@@ -2,7 +2,8 @@
 
 import { useState, useRef, useEffect } from 'react'
 import { Send, Loader2, FileText } from 'lucide-react'
-import { chatApi } from '@/lib/api'
+import { useQuery } from '@tanstack/react-query'
+import { chatApi, fundApi } from '@/lib/api'
 import { formatCurrency } from '@/lib/utils'
 
 interface Message {
@@ -18,14 +19,28 @@ export default function ChatPage() {
   const [input, setInput] = useState('')
   const [loading, setLoading] = useState(false)
   const [conversationId, setConversationId] = useState<string>()
+  const [selectedFundId, setSelectedFundId] = useState<number | undefined>()
   const messagesEndRef = useRef<HTMLDivElement>(null)
+
+  // Fetch funds list
+  const { data: funds } = useQuery({
+    queryKey: ['funds'],
+    queryFn: () => fundApi.list()
+  })
+
+  // Set default fund when funds are loaded
+  useEffect(() => {
+    if (funds && funds.length > 0 && !selectedFundId) {
+      setSelectedFundId(funds[0].id)
+    }
+  }, [funds, selectedFundId])
 
   useEffect(() => {
     // Create conversation on mount
-    chatApi.createConversation().then(conv => {
+    chatApi.createConversation(selectedFundId).then(conv => {
       setConversationId(conv.conversation_id)
     })
-  }, [])
+  }, [selectedFundId])
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
@@ -46,7 +61,7 @@ export default function ChatPage() {
     setLoading(true)
 
     try {
-      const response = await chatApi.query(input, undefined, conversationId)
+      const response = await chatApi.query(input, selectedFundId, conversationId)
       
       const assistantMessage: Message = {
         role: 'assistant',
@@ -72,7 +87,25 @@ export default function ChatPage() {
   return (
     <div className="max-w-5xl mx-auto h-[calc(100vh-12rem)]">
       <div className="mb-4">
-        <h1 className="text-4xl font-bold mb-2">Fund Analysis Chat</h1>
+        <div className="flex items-center justify-between mb-2">
+          <h1 className="text-4xl font-bold">Fund Analysis Chat</h1>
+          {funds && funds.length > 0 && (
+            <div className="flex items-center space-x-2">
+              <label className="text-sm font-medium text-gray-700">Fund:</label>
+              <select
+                value={selectedFundId || ''}
+                onChange={(e) => setSelectedFundId(Number(e.target.value))}
+                className="px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm"
+              >
+                {funds.map((fund: any) => (
+                  <option key={fund.id} value={fund.id}>
+                    {fund.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
+        </div>
         <p className="text-gray-600">
           Ask questions about fund performance, metrics, and transactions
         </p>
@@ -94,12 +127,12 @@ export default function ChatPage() {
               </p>
               <div className="space-y-2 max-w-md mx-auto">
                 <SampleQuestion
-                  question="What is the current DPI?"
-                  onClick={() => setInput("What is the current DPI?")}
+                  question="What distributions were made?"
+                  onClick={() => setInput("What distributions were made?")}
                 />
                 <SampleQuestion
-                  question="Calculate the IRR for this fund"
-                  onClick={() => setInput("Calculate the IRR for this fund")}
+                  question="What is the current DPI and how is it calculated?"
+                  onClick={() => setInput("What is the current DPI and how is it calculated?")}
                 />
                 <SampleQuestion
                   question="What does Paid-In Capital mean?"

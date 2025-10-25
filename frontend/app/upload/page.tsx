@@ -3,7 +3,8 @@
 import { useState, useCallback } from 'react'
 import { useDropzone } from 'react-dropzone'
 import { Upload, CheckCircle, XCircle, Loader2 } from 'lucide-react'
-import { documentApi } from '@/lib/api'
+import { useQuery } from '@tanstack/react-query'
+import { documentApi, fundApi } from '@/lib/api'
 
 export default function UploadPage() {
   const [uploading, setUploading] = useState(false)
@@ -13,16 +14,51 @@ export default function UploadPage() {
     documentId?: number
   }>({ status: 'idle' })
 
+  // Fund management
+  const [fundMode, setFundMode] = useState<'select' | 'create'>('select')
+  const [selectedFundId, setSelectedFundId] = useState<number | undefined>()
+  const [newFundName, setNewFundName] = useState('')
+  const [newFundGP, setNewFundGP] = useState('')
+  const [newFundYear, setNewFundYear] = useState('')
+  const [creatingFund, setCreatingFund] = useState(false)
+
+  // Fetch existing funds
+  const { data: funds, refetch: refetchFunds } = useQuery({
+    queryKey: ['funds'],
+    queryFn: () => fundApi.list()
+  })
+
   const onDrop = useCallback(async (acceptedFiles: File[]) => {
     if (acceptedFiles.length === 0) return
 
     const file = acceptedFiles[0]
-    
+
     setUploading(true)
     setUploadStatus({ status: 'uploading', message: 'Uploading file...' })
 
     try {
-      const result = await documentApi.upload(file)
+      let fundId = selectedFundId
+
+      // Create new fund if needed
+      if (fundMode === 'create') {
+        if (!newFundName.trim()) {
+          setUploadStatus({ status: 'error', message: 'Please enter fund name' })
+          setUploading(false)
+          return
+        }
+
+        setCreatingFund(true)
+        const newFund = await fundApi.create({
+          name: newFundName,
+          gp_name: newFundGP || undefined,
+          vintage_year: newFundYear ? parseInt(newFundYear) : undefined
+        })
+        fundId = newFund.id
+        setCreatingFund(false)
+        await refetchFunds()
+      }
+
+      const result = await documentApi.upload(file, fundId)
       
       setUploadStatus({
         status: 'processing',
@@ -40,7 +76,7 @@ export default function UploadPage() {
       })
       setUploading(false)
     }
-  }, [])
+  }, [fundMode, selectedFundId, newFundName, newFundGP, newFundYear, refetchFunds])
 
   const pollDocumentStatus = async (documentId: number) => {
     const maxAttempts = 60 // 5 minutes max
@@ -104,6 +140,117 @@ export default function UploadPage() {
         <p className="text-gray-600">
           Upload a PDF fund performance report to automatically extract and analyze data
         </p>
+      </div>
+
+      {/* Fund Selection/Creation */}
+      <div className="bg-white rounded-lg shadow-md p-6 mb-6">
+        <h2 className="text-xl font-semibold mb-4">Select or Create Fund</h2>
+
+        {/* Mode Toggle */}
+        <div className="flex space-x-2 mb-4">
+          <button
+            onClick={() => setFundMode('select')}
+            className={`px-4 py-2 rounded-lg font-medium transition ${
+              fundMode === 'select'
+                ? 'bg-blue-600 text-white'
+                : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+            }`}
+          >
+            Select Existing Fund
+          </button>
+          <button
+            onClick={() => setFundMode('create')}
+            className={`px-4 py-2 rounded-lg font-medium transition ${
+              fundMode === 'create'
+                ? 'bg-blue-600 text-white'
+                : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+            }`}
+          >
+            Create New Fund
+          </button>
+        </div>
+
+        {/* Select Existing Fund */}
+        {fundMode === 'select' && (
+          <div>
+            {funds && funds.length > 0 ? (
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">
+                  Choose Fund
+                </label>
+                <select
+                  value={selectedFundId || ''}
+                  onChange={(e) => setSelectedFundId(Number(e.target.value))}
+                  className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                >
+                  <option value="">Select a fund...</option>
+                  {funds.map((fund: any) => (
+                    <option key={fund.id} value={fund.id}>
+                      {fund.name} {fund.gp_name ? `(${fund.gp_name})` : ''}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            ) : (
+              <div className="text-gray-600 text-sm bg-gray-50 p-4 rounded-lg">
+                No funds available. Create a new fund to continue.
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Create New Fund */}
+        {fundMode === 'create' && (
+          <div className="space-y-4">
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                Fund Name <span className="text-red-500">*</span>
+              </label>
+              <input
+                type="text"
+                value={newFundName}
+                onChange={(e) => setNewFundName(e.target.value)}
+                placeholder="e.g., Tech Ventures Fund III"
+                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                disabled={uploading}
+              />
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                GP Name (Optional)
+              </label>
+              <input
+                type="text"
+                value={newFundGP}
+                onChange={(e) => setNewFundGP(e.target.value)}
+                placeholder="e.g., Tech Ventures Partners"
+                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                disabled={uploading}
+              />
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                Vintage Year (Optional)
+              </label>
+              <input
+                type="number"
+                value={newFundYear}
+                onChange={(e) => setNewFundYear(e.target.value)}
+                placeholder="e.g., 2023"
+                min="1900"
+                max="2100"
+                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                disabled={uploading}
+              />
+            </div>
+            {creatingFund && (
+              <div className="flex items-center space-x-2 text-blue-600">
+                <Loader2 className="w-4 h-4 animate-spin" />
+                <span className="text-sm">Creating fund...</span>
+              </div>
+            )}
+          </div>
+        )}
       </div>
 
       {/* Upload Area */}

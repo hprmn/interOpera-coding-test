@@ -3,6 +3,7 @@ Query engine service for RAG-based question answering
 """
 from typing import Dict, Any, List, Optional
 import time
+import os
 from langchain_openai import ChatOpenAI
 from langchain_community.llms import Ollama
 from langchain.prompts import ChatPromptTemplate
@@ -10,6 +11,14 @@ from app.core.config import settings
 from app.services.vector_store import VectorStore
 from app.services.metrics_calculator import MetricsCalculator
 from sqlalchemy.orm import Session
+
+# Import Gemini if available
+try:
+    from langchain_google_genai import ChatGoogleGenerativeAI
+    GEMINI_AVAILABLE = True
+except ImportError:
+    GEMINI_AVAILABLE = False
+    print("Warning: langchain-google-genai not installed. Install with: pip install langchain-google-genai")
 
 
 class QueryEngine:
@@ -22,16 +31,64 @@ class QueryEngine:
         self.llm = self._initialize_llm()
     
     def _initialize_llm(self):
-        """Initialize LLM"""
-        if settings.OPENAI_API_KEY:
+        """
+        Initialize LLM based on LLM_PROVIDER environment variable
+
+        Supported providers:
+        - gemini: Google Gemini (free tier available)
+        - openai: OpenAI GPT models (paid)
+        - ollama: Local Ollama models (free, offline)
+        """
+        llm_provider = os.getenv("LLM_PROVIDER", "openai").lower()
+
+        # Google Gemini
+        if llm_provider == "gemini":
+            google_api_key = os.getenv("GOOGLE_API_KEY")
+            if not google_api_key:
+                raise ValueError("GOOGLE_API_KEY not found in environment variables")
+
+            if not GEMINI_AVAILABLE:
+                raise ImportError(
+                    "langchain-google-genai not installed. "
+                    "Install with: pip install langchain-google-genai"
+                )
+
+            print("Initializing Google Gemini LLM...")
+            return ChatGoogleGenerativeAI(
+                model="models/gemini-2.5-flash",  # Latest Gemini Flash model
+                google_api_key=google_api_key,
+                temperature=0,
+                convert_system_message_to_human=True  # Gemini compatibility
+            )
+
+        # OpenAI
+        elif llm_provider == "openai":
+            if not settings.OPENAI_API_KEY:
+                raise ValueError("OPENAI_API_KEY not found in environment variables")
+
+            print("Initializing OpenAI LLM...")
             return ChatOpenAI(
                 model=settings.OPENAI_MODEL,
                 temperature=0,
                 openai_api_key=settings.OPENAI_API_KEY
             )
+
+        # Ollama (local)
+        elif llm_provider == "ollama":
+            ollama_model = os.getenv("OLLAMA_MODEL", "llama3.2")
+            ollama_base_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+
+            print(f"Initializing Ollama LLM (model: {ollama_model})...")
+            return Ollama(
+                model=ollama_model,
+                base_url=ollama_base_url
+            )
+
         else:
-            # Fallback to local LLM
-            return Ollama(model="llama2")
+            raise ValueError(
+                f"Unknown LLM_PROVIDER: {llm_provider}. "
+                f"Supported values: gemini, openai, ollama"
+            )
     
     async def process_query(
         self, 

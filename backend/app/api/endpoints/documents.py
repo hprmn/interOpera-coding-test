@@ -1,9 +1,9 @@
 """
 Document API endpoints
 """
-from fastapi import APIRouter, UploadFile, File, Depends, HTTPException, BackgroundTasks
+from fastapi import APIRouter, UploadFile, File, Form, Depends, HTTPException, BackgroundTasks
 from sqlalchemy.orm import Session
-from typing import List
+from typing import List, Optional
 import os
 import shutil
 from datetime import datetime
@@ -24,7 +24,7 @@ router = APIRouter()
 async def upload_document(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
-    fund_id: int = None,
+    fund_id: Optional[int] = Form(None),
     db: Session = Depends(get_db)
 ):
     """Upload and process a PDF document"""
@@ -85,30 +85,23 @@ async def upload_document(
 async def process_document_task(document_id: int, file_path: str, fund_id: int):
     """Background task to process document"""
     from app.db.session import SessionLocal
-    
+
     db = SessionLocal()
-    
+
     try:
-        # Update status to processing
-        document = db.query(Document).filter(Document.id == document_id).first()
-        document.parsing_status = "processing"
-        db.commit()
-        
-        # Process document
-        processor = DocumentProcessor()
+        # Process document with DocumentProcessor
+        processor = DocumentProcessor(db)
         result = await processor.process_document(file_path, document_id, fund_id)
-        
-        # Update status
-        document.parsing_status = result["status"]
-        if result["status"] == "failed":
-            document.error_message = result.get("error")
-        db.commit()
-        
+
+        print(f"Document processing completed: {result}")
+
     except Exception as e:
+        print(f"Error in background task: {e}")
         document = db.query(Document).filter(Document.id == document_id).first()
-        document.parsing_status = "failed"
-        document.error_message = str(e)
-        db.commit()
+        if document:
+            document.parsing_status = "failed"
+            document.error_message = str(e)
+            db.commit()
     finally:
         db.close()
 

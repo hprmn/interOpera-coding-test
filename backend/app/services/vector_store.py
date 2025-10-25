@@ -9,6 +9,7 @@ TODO: Implement vector storage using pgvector
 """
 from typing import List, Dict, Any, Optional
 import numpy as np
+import os
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 from langchain_openai import OpenAIEmbeddings
@@ -26,14 +27,25 @@ class VectorStore:
         self._ensure_extension()
     
     def _initialize_embeddings(self):
-        """Initialize embedding model"""
-        if settings.OPENAI_API_KEY:
+        """
+        Initialize embedding model based on LLM provider
+
+        When using Gemini or Ollama, use HuggingFace (local) embeddings
+        because these providers don't offer embeddings APIs.
+        Only use OpenAI embeddings when explicitly using OpenAI provider.
+        """
+        llm_provider = os.getenv("LLM_PROVIDER", "openai").lower()
+
+        # Use OpenAI embeddings only when explicitly using OpenAI provider
+        if llm_provider == "openai" and settings.OPENAI_API_KEY and settings.OPENAI_API_KEY != "sk-your-api-key-here":
+            print("Initializing OpenAI embeddings...")
             return OpenAIEmbeddings(
                 model=settings.OPENAI_EMBEDDING_MODEL,
                 openai_api_key=settings.OPENAI_API_KEY
             )
         else:
-            # Fallback to local embeddings
+            # Use local HuggingFace embeddings for Gemini, Ollama, or when no valid OpenAI key
+            print(f"Initializing HuggingFace embeddings (LLM provider: {llm_provider})...")
             return HuggingFaceEmbeddings(
                 model_name="sentence-transformers/all-MiniLM-L6-v2"
             )
@@ -41,18 +53,18 @@ class VectorStore:
     def _ensure_extension(self):
         """
         Ensure pgvector extension is enabled
-        
-        TODO: Implement this method
-        - Execute: CREATE EXTENSION IF NOT EXISTS vector;
-        - Create embeddings table if not exists
+
+        Creates document_embeddings table with appropriate vector dimensions:
+        - 1536 for OpenAI embeddings
+        - 384 for HuggingFace sentence-transformers
         """
         try:
             # Enable pgvector extension
             self.db.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
-            
-            # Create embeddings table
-            # Dimension: 1536 for OpenAI, 384 for sentence-transformers
-            dimension = 1536 if settings.OPENAI_API_KEY else 384
+
+            # Determine embedding dimension based on LLM provider
+            llm_provider = os.getenv("LLM_PROVIDER", "openai").lower()
+            dimension = 1536 if llm_provider == "openai" and settings.OPENAI_API_KEY != "sk-your-api-key-here" else 384
             
             create_table_sql = f"""
             CREATE TABLE IF NOT EXISTS document_embeddings (
@@ -79,29 +91,32 @@ class VectorStore:
     async def add_document(self, content: str, metadata: Dict[str, Any]):
         """
         Add a document to the vector store
-        
-        TODO: Implement this method
+
         - Generate embedding for content
         - Insert into document_embeddings table
         - Store metadata as JSONB
         """
         try:
-            # Generate embedding
-            embedding = await self._get_embedding(content)
+            # Generate embedding (sync call, not async)
+            embedding = self._get_embedding(content)
             embedding_list = embedding.tolist()
-            
+
+            # Convert metadata to JSON string
+            import json
+            metadata_json = json.dumps(metadata)
+
             # Insert into database
             insert_sql = text("""
                 INSERT INTO document_embeddings (document_id, fund_id, content, embedding, metadata)
-                VALUES (:document_id, :fund_id, :content, :embedding::vector, :metadata::jsonb)
+                VALUES (:document_id, :fund_id, :content, CAST(:embedding AS vector), CAST(:metadata AS jsonb))
             """)
-            
+
             self.db.execute(insert_sql, {
                 "document_id": metadata.get("document_id"),
                 "fund_id": metadata.get("fund_id"),
                 "content": content,
                 "embedding": str(embedding_list),
-                "metadata": str(metadata)
+                "metadata": metadata_json
             })
             self.db.commit()
         except Exception as e:
@@ -110,63 +125,65 @@ class VectorStore:
             raise
     
     async def similarity_search(
-        self, 
-        query: str, 
-        k: int = 5, 
+        self,
+        query: str,
+        k: int = 5,
         filter_metadata: Optional[Dict[str, Any]] = None
     ) -> List[Dict[str, Any]]:
         """
         Search for similar documents using cosine similarity
-        
-        TODO: Implement this method
+
         - Generate query embedding
         - Use pgvector's <=> operator for cosine distance
         - Apply metadata filters if provided
         - Return top k results
-        
+
         Args:
             query: Search query
             k: Number of results to return
             filter_metadata: Optional metadata filters (e.g., {"fund_id": 1})
-            
+
         Returns:
             List of similar documents with scores
         """
         try:
-            # Generate query embedding
-            query_embedding = await self._get_embedding(query)
+            # Generate query embedding (sync call, not async)
+            query_embedding = self._get_embedding(query)
             embedding_list = query_embedding.tolist()
-            
+
             # Build query with optional filters
             where_clause = ""
+            params = {
+                "query_embedding": str(embedding_list),
+                "k": k
+            }
+
             if filter_metadata:
                 conditions = []
                 for key, value in filter_metadata.items():
                     if key in ["document_id", "fund_id"]:
-                        conditions.append(f"{key} = {value}")
+                        conditions.append(f"{key} = :{key}")
+                        params[key] = value
                 if conditions:
                     where_clause = "WHERE " + " AND ".join(conditions)
-            
+
             # Search using cosine distance (<=> operator)
             search_sql = text(f"""
-                SELECT 
+                SELECT
                     id,
                     document_id,
                     fund_id,
                     content,
                     metadata,
-                    1 - (embedding <=> :query_embedding::vector) as similarity_score
+                    1 - (embedding <=> CAST(:query_embedding AS vector)) as similarity_score
                 FROM document_embeddings
                 {where_clause}
-                ORDER BY embedding <=> :query_embedding::vector
+                ORDER BY embedding <=> CAST(:query_embedding AS vector)
                 LIMIT :k
             """)
-            
-            result = self.db.execute(search_sql, {
-                "query_embedding": str(embedding_list),
-                "k": k
-            })
-            
+
+            result = self.db.execute(search_sql, params)
+
             # Format results
             results = []
             for row in result:
@@ -176,21 +193,23 @@ class VectorStore:
                     "fund_id": row[2],
                     "content": row[3],
                     "metadata": row[4],
-                    "score": float(row[5])
+                    "score": float(row[5]) if row[5] is not None else 0.0
                 })
-            
+
             return results
         except Exception as e:
             print(f"Error in similarity search: {e}")
+            import traceback
+            traceback.print_exc()
             return []
     
-    async def _get_embedding(self, text: str) -> np.ndarray:
-        """Generate embedding for text"""
+    def _get_embedding(self, text: str) -> np.ndarray:
+        """Generate embedding for text (synchronous)"""
         if hasattr(self.embeddings, 'embed_query'):
             embedding = self.embeddings.embed_query(text)
         else:
             embedding = self.embeddings.encode(text)
-        
+
         return np.array(embedding, dtype=np.float32)
     
     def clear(self, fund_id: Optional[int] = None):
